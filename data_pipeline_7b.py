@@ -283,6 +283,8 @@ class Stage5_7BVerification:
             df = pd.read_csv(csv_path)
             roi_medians = {}
             
+            print(f"  📊 Calculating medians from {len(df)} rows...")
+            
             for col in df.columns:
                 if not col.startswith('ROI_'):
                     continue
@@ -299,7 +301,7 @@ class Stage5_7BVerification:
                         
                         if len(vals) >= 5:  # 至少5个有效样本
                             roi_medians[col] = vals.median()
-                            print(f"    Median for {col}: {roi_medians[col]:.3f} (from {len(vals)} samples)")
+                            print(f"    ✓ {col}: Median={roi_medians[col]:.3f} (from {len(vals)} samples)")
                     except:
                         pass
                 
@@ -309,11 +311,13 @@ class Stage5_7BVerification:
                         value_counts = df[col].value_counts()
                         if not value_counts.empty:
                             roi_medians[col] = value_counts.index[0]  # 最常见的值
-                            print(f"    Most common for {col}: {roi_medians[col]}")
+                            print(f"    ✓ {col}: Most common={roi_medians[col]}")
                     except:
                         pass
             
+            print(f"  📊 Calculated medians for {len(roi_medians)} ROI fields")
             return roi_medians
+            
         except Exception as e:
             print(f"  ⚠️  Error calculating medians: {e}")
             return {}

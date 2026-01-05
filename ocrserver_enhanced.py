@@ -36,7 +36,7 @@ class MedianTracker:
         self.data = defaultdict(list)  # roi_id -> [values]
         self.medians = {}  # roi_id -> current_median
         self.lock = threading.Lock()
-        self.min_samples = 5  # 最少样本数才计算median
+        self.min_samples = 50  # 最少样本数才计算median（需要50+检测）
         
     def add_value(self, roi_id, value, data_type):
         """添加新值并更新median"""

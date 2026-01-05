@@ -53,11 +53,17 @@ class DataValidator:
         
         if data_type == 'STATUS':
             val_upper = val_str.upper()
-            if val_upper.startswith('N'):
+            # 检查NaN - 不应该被转换为OK
+            if val_upper in ['NAN', 'NA', 'NULL', 'NONE', '']:
+                return False, 'NA', "NaN/Empty Status"
+            if val_upper.startswith('N') and 'G' in val_upper:
                 return True, 'NG', None
-            if 'O' in val_upper or 'K' in val_upper or '0' in val_upper:
+            if val_upper == 'NG' or val_upper == 'N':
+                return True, 'NG', None
+            if 'OK' in val_upper or val_upper == 'O' or val_upper == 'K':
                 return True, 'OK', None
-            return False, val, "Invalid Status"
+            # 只有明确的OK/NG才返回，其他都标记为需要检查
+            return False, val, "Invalid Status - needs review"
         
         elif data_type == 'INTEGER':
             clean_val = re.sub(r'[^\d-]', '', val_str)
@@ -264,6 +270,54 @@ class Stage2_3BCorrection:
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
     
+    def calculate_roi_medians(self, csv_path):
+        """
+        从CSV计算每个ROI的median值
+        返回: {roi_id: median_value}
+        """
+        try:
+            df = pd.read_csv(csv_path)
+            roi_medians = {}
+            
+            print(f"  📊 Calculating medians from {len(df)} rows...")
+            
+            for col in df.columns:
+                if not col.startswith('ROI_'):
+                    continue
+                
+                roi_type = get_roi_type(col)
+                
+                # 只对数值类型计算median
+                if roi_type in ['INTEGER', 'FLOAT']:
+                    try:
+                        # 转换为数值，忽略错误
+                        vals = pd.to_numeric(df[col], errors='coerce').dropna()
+                        # 过滤掉0值（可能是缺陷）
+                        vals = vals[vals > 0]
+                        
+                        if len(vals) >= 5:  # 至少5个有效样本
+                            roi_medians[col] = vals.median()
+                            print(f"    ✓ {col}: Median={roi_medians[col]:.3f} (from {len(vals)} samples)")
+                    except Exception as e:
+                        print(f"    ⚠️  {col}: Could not calculate median - {e}")
+                
+                elif roi_type == 'STATUS':
+                    # 对于STATUS，找出最常见的值
+                    try:
+                        value_counts = df[col].value_counts()
+                        if not value_counts.empty:
+                            roi_medians[col] = value_counts.index[0]  # 最常见的值
+                            print(f"    ✓ {col}: Most common={roi_medians[col]}")
+                    except Exception as e:
+                        print(f"    ⚠️  {col}: Could not find mode - {e}")
+            
+            print(f"  📊 Calculated medians for {len(roi_medians)} ROI fields")
+            return roi_medians
+            
+        except Exception as e:
+            print(f"  ❌ Error calculating medians: {e}")
+            return {}
+    
     def run_3b_inference(self, image_path, roi_id, median_val, ocr_value):
         """使用3B模型重新识别"""
         try:
@@ -285,19 +339,67 @@ class Stage2_3BCorrection:
             text = re.sub(r'<[^>]+>', '', text).replace('```', '').replace('`', '').strip()
             text = re.sub(r'^(Output:|Result:)', '', text, flags=re.IGNORECASE).strip()
             
-            # 处理浮点数截断
+            # 后处理：修复常见格式错误
             roi_type = get_roi_type(roi_id)
-            if roi_type == 'FLOAT':
-                decimal_match = re.match(r'^(-?\d+\.\d{4,})', text)
-                if decimal_match:
-                    parts = text.split('.')
-                    text = f"{parts[0]}.{parts[1][:3]}"
+            text = self.post_process_number(text, roi_type, median_val)
             
             return text if text else "ERROR"
             
         except Exception as e:
             print(f"  [3B Error] {e}")
             return "ERROR"
+    
+    def post_process_number(self, text, roi_type, median_val):
+        """
+        后处理数字输出 - 只做基本清理，不自动修复重复模式
+        - 清理markdown标记
+        - 截断小数位数到3位
+        - 检测问题并警告（不自动修复）
+        """
+        if not text or text in ["ERROR", "NA", "Image Not Found"]:
+            return text
+        
+        original = text
+        
+        if roi_type == 'FLOAT':
+            # 1. 检测多小数点 (e.g., '5.7.726') - 只警告，不自动修复
+            decimal_count = text.count('.')
+            if decimal_count > 1:
+                print(f"    ⚠️ [Warning] Multiple decimals detected: '{text}' - keeping as-is for review")
+            
+            # 2. 检测可能的重复模式 - 只警告，不自动修复
+            repeat_match = re.match(r'^(-?\d+\.\d{1,3})\1+', text)
+            if repeat_match:
+                print(f"    ⚠️ [Warning] Possible repeat pattern: '{text}' - keeping as-is for review")
+            
+            # 3. 只截断过长的小数位数（这是格式标准化，不是修复）
+            if '.' in text:
+                parts = text.split('.')
+                if len(parts) == 2 and len(parts[1]) > 3:
+                    text = f"{parts[0]}.{parts[1][:3]}"
+                    if text != original:
+                        print(f"    [Truncate] '{original}' → '{text}' (max 3 decimals)")
+        
+        elif roi_type == 'INTEGER':
+            # 1. 检测小数点 - 只警告
+            if '.' in text:
+                print(f"    ⚠️ [Warning] Decimal in INTEGER: '{text}' - keeping for review")
+            
+            # 2. 检测可能的重复模式 - 只警告，不自动修复
+            clean_text = re.sub(r'[^\d-]', '', text)
+            if clean_text:
+                length = len(clean_text.lstrip('-'))
+                for repeat_len in range(1, length // 2 + 1):
+                    base = clean_text[:repeat_len + (1 if clean_text.startswith('-') else 0)]
+                    if clean_text.startswith('-'):
+                        pattern = base + base[1:] * ((length // repeat_len) - 1)
+                    else:
+                        pattern = base * (length // repeat_len)
+                    if pattern == clean_text and length >= repeat_len * 2:
+                        print(f"    ⚠️ [Warning] Possible repeat pattern: '{text}' - keeping as-is for review")
+                        break
+        
+        return text
     
     def find_crop_image(self, csv_base, filename, roi_id):
         """查找裁剪图像"""
@@ -327,17 +429,13 @@ class Stage2_3BCorrection:
             if df_bad.empty:
                 return
             
-            # 加载Median值
+            # 从输入CSV加载并计算Median值
             roi_medians = {}
             if cleaned_csv_path.exists():
-                df_clean = pd.read_csv(cleaned_csv_path)
-                for col in df_clean.columns:
-                    try:
-                        vals = pd.to_numeric(df_clean[col], errors='coerce').dropna()
-                        if not vals.empty:
-                            roi_medians[col] = vals.median()
-                    except:
-                        pass
+                roi_medians = self.calculate_roi_medians(cleaned_csv_path)
+            else:
+                print(f"  ⚠️  Cleaned CSV not found, proceeding without median context")
+                
         except Exception as e:
             print(f"  ❌ Error: {e}")
             return
