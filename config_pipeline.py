@@ -200,29 +200,7 @@ PROMPTS = {
             "\n" + NOISE_FILTER_RULES
         ),
         'correction': (
-            "Task: Re-verify the status indicator.\n"
-            "Context: OCR previously read '{ocr_value}', but validation failed.\n"
-            "Reference (guideline only): {median_context}\n"
-            "\n"
-            "🎨 COLOR IDENTIFICATION (CRITICAL):\n"
-            "  - GREEN text = 'OK' (pass/good)\n"
-            "  - RED text = 'NG' (fail/bad)\n"
-            "  - Trust the COLOR, not just the text shape!\n"
-            "\n"
-            "📋 CLASSIFICATION RULES (ONLY 2 outputs allowed):\n"
-            "  ✅ Starts with 'O' → Output: OK (includes O, OH, OK, 0)\n"
-            "  ❌ Starts with 'N' → Output: NG (includes N, NG, NH, NO, NaN)\n"
-            "\n"
-            "⚠️ CRITICAL: Report EXACTLY what you SEE in the image!\n"
-            "- The median/reference is ONLY a guideline, NOT a correction target\n"
-            "\n"
-            "Rules:\n"
-            "1. Look VERY carefully at the image\n"
-            "2. Output ONLY 'OK' or 'NG' (no NA allowed)\n"
-            "3. GREEN text or starts with O → OK\n"
-            "4. RED text or starts with N → NG\n"
-            "5. If blank/unreadable → Output: NG (fail-safe)\n"
-            "6. Trust what you SEE, not the previous OCR result or median"
+            "Task: Classify as 'OK' or 'NG'. (0/OK/OH -> OK, N/NG -> NG). Output ONLY one word."
         )
     },
     'INTEGER': {
@@ -242,30 +220,11 @@ PROMPTS = {
             "\n" + NOISE_FILTER_RULES
         ),
         'correction': (
-            "Task: Re-read this integer value with high precision.\n"
-            "Context: OCR read '{ocr_value}'\n"
-            "Reference (guideline only): {median_context}\n"
-            "\n"
-            "⚠️ CRITICAL: Report EXACTLY what you SEE in the image!\n"
-            "- The median/reference is ONLY a guideline for sanity check\n"
-            "- Do NOT automatically correct your reading to match the median\n"
-            "- If the image clearly shows a number, report that number\n"
-            "- Real measurements CAN differ from median - that's normal!\n"
-            "\n"
-            "🔴 SPECIAL CHECK - If value differs 5x+ from reference:\n"
-            "- STOP and look VERY carefully at the image\n"
-            "- Are there repeated digits (e.g., '9898' should be '98')?\n"
-            "- Is there digit confusion (1 vs 7, 6 vs 8)?\n"
-            "- Then report what you ACTUALLY see after careful review\n"
-            "\n"
-            "Common OCR errors to watch for:\n"
-            "- Repeated digits: '9898' → probably '98'\n"
-            "- Missing digits (incomplete crop)\n"
-            "- Extra digits (noise artifacts)\n"
-            "- Sign errors\n"
-            "\n"
-            "Output ONLY the integer you actually SEE. NO decimal points.\n"
-            "\n" + NOISE_FILTER_RULES
+            "Task: Extract the integer.\n"
+            "CONTEXT: Similar sensors usually read around {median_context}. "
+            "Use this context ONLY to fix obvious formatting errors (e.g. '188' -> '1.88'). "
+            "However, if the image clearly shows '0' or is blank, IGNORE context and output '0'.\n"
+            "Rules: Output ONLY the integer value. If 0 or blank, output 0. NO HTML."
         )
     },
     'FLOAT': {
@@ -283,33 +242,16 @@ PROMPTS = {
             "\n" + NUMBER_VALIDATION_RULES + "\n" + NOISE_FILTER_RULES
         ),
         'correction': (
-            "Task: Re-extract floating-point number with EXTREME precision.\n"
-            "Context: OCR read '{ocr_value}'\n"
-            "Reference (guideline only): {median_context}\n"
-            "\n"
-            "⚠️ CRITICAL: Report EXACTLY what you SEE in the image!\n"
-            "- The median/reference is ONLY a guideline, NOT a correction target\n"
-            "- Do NOT automatically adjust your reading to match the median\n"
-            "- If you clearly see '188' with NO decimal point → Output: 188 (not 1.88)\n"
-            "- If you clearly see '1.88' WITH decimal point → Output: 1.88\n"
-            "- Real measurements CAN differ significantly from median!\n"
-            "\n"
-            "🔴 SPECIAL CHECK - If value differs 5x+ from reference:\n"
-            "- STOP and look VERY carefully at the image\n"
-            "- Is there a decimal point you missed?\n"
-            "- Are there repeated digits (OCR artifact)?\n"
-            "- Then report what you ACTUALLY see after careful review\n"
-            "\n"
-            "What to check:\n"
-            "1. Is there a decimal point VISIBLE in the image?\n"
-            "2. Count the actual digits you see\n"
-            "3. ONLY ONE decimal point allowed in output\n"
-            "4. Maximum 3 digits after decimal\n"
-            "5. If display shows '0' or is blank → Output: 0 (defect)\n"
-            "\n"
-            "Output ONLY the number you actually SEE. Do NOT guess or adjust to median.\n"
-            "Output format: X.XXX (one decimal point, max 3 decimals)\n"
-            "\n" + NUMBER_VALIDATION_RULES + "\n" + NOISE_FILTER_RULES
+            "Task: Extract the digital number from the image.\n"
+            "CONTEXT: Similar sensors usually read around {median_context}. "
+            "Use this context ONLY to fix obvious formatting errors (e.g. '188' -> '1.88'). "
+            "However, if the image clearly shows '0' or is blank, IGNORE context and output '0'.\n"
+            "STRICT RULES:\n"
+            "1. Output ONLY the number.\n"
+            "2. FORMATTING: If the number is large (e.g. 188) but context is small (e.g. 1.88), add the decimal.\n"
+            "3. DEFECTS: If the value is '0', '0.0', or blank, output '0'.\n"
+            "4. TRUNCATE: Max 3 decimal places (e.g. '9.18181' -> '9.181').\n"
+            "5. NO HTML, NO MARKDOWN."
         )
     },
     'TIME': {
@@ -323,13 +265,7 @@ PROMPTS = {
             "5. NO markdown"
         ),
         'correction': (
-            "Task: Re-read timestamp carefully.\n"
-            "Context: Previous read was '{ocr_value}'\n"
-            "Check for:\n"
-            "- Correct colon positions\n"
-            "- All digits present\n"
-            "- No extra characters\n"
-            "Output: HH:MM:SS"
+            "Task: Read Timestamp (HH:MM:SS). Remove trailing text. NO HTML."
         ),
         'mismatch': (
             "Task: Resolve timestamp dispute with HIGH precision.\n"
