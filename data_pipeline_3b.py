@@ -409,15 +409,39 @@ class Stage2_3BCorrection:
         return text
     
     def find_crop_image(self, csv_base, filename, roi_id):
-        """查找裁剪图像"""
+        """查找裁剪图像 - 支持多路径回退"""
         folder_name = os.path.splitext(filename)[0]
         
+        # Primary: crops_base
         potential_paths = [
             self.crops_base / csv_base / folder_name / f"{roi_id}.jpg",
             self.crops_base / csv_base / folder_name / f"{roi_id}.png",
             self.crops_base / folder_name / f"{roi_id}.jpg",
             self.crops_base / folder_name / f"{roi_id}.png",
         ]
+        
+        # Fallback 1: DEBUG_CROPS_INPUT (flattened)
+        potential_paths.extend([
+            DEBUG_CROPS_INPUT / folder_name / f"{roi_id}.jpg",
+            DEBUG_CROPS_INPUT / folder_name / f"{roi_id}.png",
+        ])
+        
+        # Fallback 2: DEBUG_CROPS_BASE (if different from crops_base)
+        if DEBUG_CROPS_BASE != self.crops_base:
+            potential_paths.extend([
+                DEBUG_CROPS_BASE / folder_name / f"{roi_id}.jpg",
+                DEBUG_CROPS_BASE / folder_name / f"{roi_id}.png",
+                DEBUG_CROPS_BASE / csv_base / folder_name / f"{roi_id}.jpg",
+                DEBUG_CROPS_BASE / csv_base / folder_name / f"{roi_id}.png",
+            ])
+        
+        # Fallback 3: MANUAL_CHECK paths (Abnormal)
+        potential_paths.extend([
+            MANUAL_CHECK_BASE_Abnormal / csv_base / folder_name / f"{roi_id}.jpg",
+            MANUAL_CHECK_BASE_Abnormal / csv_base / folder_name / f"{roi_id}.png",
+            MANUAL_CHECK_BASE_Abnormal / folder_name / f"{roi_id}.jpg",
+            MANUAL_CHECK_BASE_Abnormal / folder_name / f"{roi_id}.png",
+        ])
         
         for p in potential_paths:
             if p.exists():
