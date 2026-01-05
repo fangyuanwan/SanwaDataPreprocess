@@ -53,17 +53,24 @@ class DataValidator:
         
         if data_type == 'STATUS':
             val_upper = val_str.upper()
-            # 检查NaN - 不应该被转换为OK
-            if val_upper in ['NAN', 'NA', 'NULL', 'NONE', '']:
-                return False, 'NA', "NaN/Empty Status"
-            if val_upper.startswith('N') and 'G' in val_upper:
-                return True, 'NG', None
-            if val_upper == 'NG' or val_upper == 'N':
-                return True, 'NG', None
-            if 'OK' in val_upper or val_upper == 'O' or val_upper == 'K':
+            # 分类规则：只有OK或NG两种输出
+            # 以O开头 → OK (O, OH, OK, 0)
+            # 以N开头 → NG (N, NG, NH, NO, NaN)
+            
+            if val_upper.startswith('O') or val_upper == '0' or 'OK' in val_upper:
                 return True, 'OK', None
-            # 只有明确的OK/NG才返回，其他都标记为需要检查
-            return False, val, "Invalid Status - needs review"
+            if val_upper.startswith('N'):
+                # N, NG, NH, NO, NaN 都分类为NG
+                return True, 'NG', None
+            if val_upper == 'K':
+                return True, 'OK', None
+            if val_upper == 'G':
+                return True, 'NG', None
+            # 空白或无法识别 → 标记为需要检查
+            if val_upper in ['', 'NAN', 'NA', 'NULL', 'NONE']:
+                return False, val, "Empty/Invalid Status - needs review"
+            # 其他情况标记为需要检查
+            return False, val, "Unknown Status - needs review"
         
         elif data_type == 'INTEGER':
             clean_val = re.sub(r'[^\d-]', '', val_str)
