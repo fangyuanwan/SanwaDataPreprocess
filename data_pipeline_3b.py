@@ -38,9 +38,10 @@ print_lock = threading.Lock()
 class DataValidator:
     """数据验证器 - 检测异常值"""
     
-    def __init__(self, max_decimals=3, outlier_threshold=5.0):
+    def __init__(self, max_decimals=3, outlier_threshold=5.0, z_score_threshold=3.0):
         self.max_decimals = max_decimals
-        self.outlier_threshold = outlier_threshold
+        self.outlier_threshold = outlier_threshold  # 比率阈值 (5x median)
+        self.z_score_threshold = z_score_threshold  # Z-Score 阈值 (默认 3.0)
     
     def validate_value(self, val, data_type):
         """
@@ -73,6 +74,12 @@ class DataValidator:
             return False, val, "Unknown Status - needs review"
         
         elif data_type == 'INTEGER':
+            # 先尝试处理浮点数格式（如 '95.0' → 95，避免 '95.0' → '950' 的bug）
+            try:
+                return True, int(float(val_str)), None
+            except:
+                pass
+            # 如果上面失败，再用正则清理非数字字符
             clean_val = re.sub(r'[^\d-]', '', val_str)
             if re.match(r'^-?\d+$', clean_val):
                 return True, int(clean_val), None
@@ -96,26 +103,97 @@ class DataValidator:
         return False, val, "Unknown Type"
     
     def detect_outliers(self, series, data_type):
-        """统计异常值检测"""
+        """
+        统计异常值检测 - 双重检测机制
+        
+        Method 1: Ratio-based (5x median) - 检测严重的数量级错误
+                  例如: 177 vs median=1.18 → ratio=150x → 检测到
+        
+        Method 2: Z-Score (标准差) - 检测偏离正常范围的值
+                  例如: 2.03 vs mean=1.2, std=0.05 → Z=16.6 → 检测到
+                  
+        返回: [(index, reason), ...] 包含异常原因的元组列表
+        """
         if data_type not in ['FLOAT', 'INTEGER']:
             return []
         
         nums = pd.to_numeric(series, errors='coerce').dropna()
-        if len(nums) < 5 or nums.median() == 0:
+        if len(nums) < 5:
             return []
         
         median = nums.median()
-        outlier_indices = []
+        mean = nums.mean()
+        std = nums.std()
+        
+        outlier_results = []  # [(index, reason), ...]
         
         for idx, val in series.items():
             try:
-                ratio = float(val) / median
-                if ratio > self.outlier_threshold or ratio < (1.0 / self.outlier_threshold):
-                    outlier_indices.append(idx)
+                val_float = float(val)
+                
+                # Skip zero/invalid values
+                if val_float == 0 or pd.isna(val_float):
+                    continue
+                
+                # Method 1: Ratio-based detection (5x median)
+                # 检测严重的数量级错误，如缺少小数点 (177 vs 1.77)
+                if median != 0:
+                    ratio = val_float / median
+                    if ratio > self.outlier_threshold or ratio < (1.0 / self.outlier_threshold):
+                        outlier_results.append((idx, "Statistical Outlier (Likely Missing Decimal)"))
+                        continue  # 已检测，跳过 Z-Score
+                
+                # Method 2: Z-Score detection
+                # 检测偏离正常范围的值，如 2.03 vs 正常范围 1.1-1.3
+                if std > 0:
+                    z_score = abs((val_float - mean) / std)
+                    if z_score > self.z_score_threshold:
+                        outlier_results.append((idx, f"Z-Score Outlier (Z={z_score:.2f}, threshold={self.z_score_threshold})"))
+                
             except:
                 pass
         
-        return outlier_indices
+        return outlier_results
+    
+    def detect_outliers_zscore_only(self, series, data_type):
+        """
+        仅使用 Z-Score 检测异常值
+        适用于需要更精细检测的场景
+        
+        Z-Score 阈值参考:
+        - Z > 2.0: ~5% 异常 (95% 置信区间)
+        - Z > 2.5: ~1.2% 异常 
+        - Z > 3.0: ~0.3% 异常 (99.7% 置信区间) [推荐]
+        - Z > 3.5: ~0.05% 异常 (更保守)
+        """
+        if data_type not in ['FLOAT', 'INTEGER']:
+            return []
+        
+        nums = pd.to_numeric(series, errors='coerce').dropna()
+        if len(nums) < 5:
+            return []
+        
+        mean = nums.mean()
+        std = nums.std()
+        
+        if std == 0:
+            return []
+        
+        outlier_results = []
+        
+        for idx, val in series.items():
+            try:
+                val_float = float(val)
+                if val_float == 0 or pd.isna(val_float):
+                    continue
+                    
+                z_score = abs((val_float - mean) / std)
+                if z_score > self.z_score_threshold:
+                    outlier_results.append((idx, f"Z-Score Outlier (Z={z_score:.2f})"))
+            except:
+                pass
+        
+        return outlier_results
 
 class Stage1_DataCleaning:
     """阶段1: 数据清理和异常检测"""
@@ -124,7 +202,7 @@ class Stage1_DataCleaning:
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.crops_base = Path(crops_base)
-        self.validator = DataValidator(MAX_DECIMALS, OUTLIER_THRESHOLD)
+        self.validator = DataValidator(MAX_DECIMALS, OUTLIER_THRESHOLD, Z_SCORE_THRESHOLD)
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -210,18 +288,19 @@ class Stage1_DataCleaning:
                             'Reason': reason
                         })
         
-        # 阶段2: 统计异常检测
-        print(f"  📊 Detecting statistical outliers...")
+        # 阶段2: 统计异常检测 (双重检测: Ratio-based + Z-Score)
+        print(f"  📊 Detecting statistical outliers (Ratio + Z-Score)...")
         for roi_col, dtype in roi_map.items():
             if roi_col in df_clean.columns:
-                outliers = self.validator.detect_outliers(df_clean[roi_col], dtype)
-                for idx in outliers:
+                # 返回格式: [(index, reason), ...]
+                outlier_results = self.validator.detect_outliers(df_clean[roi_col], dtype)
+                for idx, reason in outlier_results:
                     abnormal_records.append({
                         'Filename': df_clean.at[idx, 'Filename'],
                         'Timestamp': df_clean.at[idx, 'ROI_52'] if 'ROI_52' in df_clean.columns else '',
                         'ROI_ID': roi_col,
                         'Value': df_clean.at[idx, roi_col],
-                        'Reason': "Statistical Outlier (Likely Missing Decimal)"
+                        'Reason': reason  # 现在包含具体的检测方法和详情
                     })
         
         # 保存结果
@@ -325,10 +404,39 @@ class Stage2_3BCorrection:
             print(f"  ❌ Error calculating medians: {e}")
             return {}
     
+    def clean_model_output(self, text, roi_type='FLOAT'):
+        """
+        保留模型原始输出，只移除模型内部控制tokens
+        """
+        if not text:
+            return "ERROR"
+        
+        # 移除模型内部控制tokens（这些是模型格式标记，不是数据）
+        import re
+        special_tokens = [
+            r'<\|im_start\|>',
+            r'<\|im_end\|>',
+            r'<\|endoftext\|>',
+            r'<\|pad\|>',
+            r'<\|assistant\|>',
+            r'<\|user\|>',
+            r'<\|system\|>',
+        ]
+        for token in special_tokens:
+            text = re.sub(token, '', text)
+        
+        # 只取第一行第一个词（不修改数值内容）
+        text = text.strip()
+        text = text.split('\n')[0].strip()
+        text = text.split()[0] if text.split() else text
+        
+        return text if text else "ERROR"
+    
     def run_3b_inference(self, image_path, roi_id, median_val, ocr_value):
-        """使用3B模型重新识别"""
+        """使用7B模型重新识别"""
         try:
             prompt = get_prompt(roi_id, 'correction', ocr_value, median_val)
+            roi_type = get_roi_type(roi_id)
             
             response = ollama.chat(
                 model=OLLAMA_MODEL_7B,  # Using 7B for better accuracy
@@ -342,12 +450,10 @@ class Stage2_3BCorrection:
             
             text = response['message']['content']
             
-            # 清理输出
-            text = re.sub(r'<[^>]+>', '', text).replace('```', '').replace('`', '').strip()
-            text = re.sub(r'^(Output:|Result:)', '', text, flags=re.IGNORECASE).strip()
+            # 使用增强的清理函数
+            text = self.clean_model_output(text, roi_type)
             
-            # 后处理：修复常见格式错误
-            roi_type = get_roi_type(roi_id)
+            # 后处理：额外检查
             text = self.post_process_number(text, roi_type, median_val)
             
             return text if text else "ERROR"

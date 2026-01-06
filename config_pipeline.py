@@ -51,7 +51,7 @@ OLLAMA_MODEL_7B = "qwen2.5vl:7b"
 # 推荐配置（4块V100）：
 MAX_WORKERS_3B = 16  # 4 GPUs * 4 workers = 16 (保守配置)
                      # 可以尝试 20-24 如果显存充足
-MAX_WORKERS_7B = 8   # 4 GPUs * 2 workers = 8 (保守配置)
+MAX_WORKERS_7B = 12   # 4 GPUs * 2 workers = 8 (保守配置)
                      # 可以尝试 12 如果显存充足
 
 # 性能调优建议：
@@ -133,7 +133,12 @@ for cfg in ROI_CONFIGS:
 
 # ================= 数据验证配置 / Data Validation Configuration =================
 MAX_DECIMALS = 3
-OUTLIER_THRESHOLD = 5.0
+OUTLIER_THRESHOLD = 5.0       # Ratio-based: 检测 >5x 或 <0.2x median 的值 (缺少小数点)
+Z_SCORE_THRESHOLD = 3.0       # Z-Score: 检测偏离正常范围的值 (>3 标准差)
+                               # Z > 2.0: ~5% 异常 (95% 置信区间)
+                               # Z > 2.5: ~1.2% 异常 
+                               # Z > 3.0: ~0.3% 异常 (99.7% 置信区间) [推荐]
+                               # Z > 3.5: ~0.05% 异常 (更保守)
 FROZEN_THRESHOLD_SECONDS = 10.0
 
 # 自适应阈值配置（针对不同数据集）/ Adaptive Threshold Configuration
@@ -158,6 +163,13 @@ NOISE_FILTER_RULES = """
 4. ONLY read complete, fully visible numbers in the main display area
 5. If a digit is only 50% visible or less → DO NOT guess, skip it
 6. Focus on the primary number display, not peripheral text
+
+🚫🚫🚫 STRICTLY FORBIDDEN OUTPUT (WILL BE REJECTED):
+- <|im_start|>, <|im_end|>, <|endoftext|>, <|pad|> - these are model tokens, NOT data!
+- Any text starting with <| or ending with |>
+- HTML tags: <br>, <p>, <div>, <span>, etc.
+- Markdown: **, __, ```, #, etc.
+- Output ONLY: the raw number, 'OK', 'NG', or timestamp (HH:MM:SS)
 """
 
 # 数字格式验证规则（应用于FLOAT和INTEGER）
@@ -196,62 +208,56 @@ PROMPTS = {
             "2. If text starts with O or looks like O → Output: OK\n"
             "3. If text starts with N or looks like N → Output: NG\n"
             "4. If image is blank or unreadable → Output: NG (default to fail-safe)\n"
-            "5. NO markdown, NO explanations.\n"
+            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown\n"
             "\n" + NOISE_FILTER_RULES
         ),
         'correction': (
-            "Task: Classify as 'OK' or 'NG'. (0/OK/OH -> OK, N/NG -> NG). Output ONLY one word."
+            "Task: Classify as 'OK' or 'NG'. (0/OK/OH -> OK, N/NG -> NG).\n"
+            "Output ONLY one word.\n"
+            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         )
     },
     'INTEGER': {
         'initial': (
             "Task: Extract the integer number from this digital display.\n"
             "Rules:\n"
-            "1. Output ONLY the integer (no decimals, no units)\n"
+            "1. Output ONLY the integer you see\n"
             "2. If negative, include the '-' sign\n"
-            "3. If blank or error → Output: 0\n"
-            "4. Remove any non-digit characters\n"
-            "5. NO decimal points in output (this is INTEGER)\n"
-            "6. NO markdown formatting\n"
-            "\n"
-            "🔢 PATTERN CHECK:\n"
-            "- Watch for repeated digits (OCR error): '9898' might be '98'\n"
-            "- If number seems 5x+ different from typical → look carefully\n"
+            "3. If blank → Output: 0\n"
+            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown\n"
             "\n" + NOISE_FILTER_RULES
         ),
         'correction': (
-            "Task: Extract the integer.\n"
-            "CONTEXT: Similar sensors usually read around {median_context}. "
-            "Use this context ONLY to fix obvious formatting errors (e.g. '188' -> '1.88'). "
-            "However, if the image clearly shows '0' or is blank, IGNORE context and output '0'.\n"
-            "Rules: Output ONLY the integer value. If 0 or blank, output 0. NO HTML."
+            "Task: Extract the integer from the image.\n"
+            "CONTEXT: Similar sensors usually read around {median_context}.\n"
+            "STRICT RULES:\n"
+            "1. Output ONLY the integer number (no decimal point).\n"
+            "2. If blank, output '0'.\n"
+            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         )
     },
     'FLOAT': {
         'initial': (
             "Task: Extract the floating-point number from this sensor reading.\n"
             "Rules:\n"
-            "1. Output ONLY the number (include decimal point if visible)\n"
-            "2. Maximum 3 decimal places (e.g., 9.181 not 9.18181)\n"
-            "3. ONLY ONE decimal point allowed in output\n"
-            "4. If value is 0 or blank → Output: 0\n"
-            "5. Common patterns:\n"
-            "   - '1.88' NOT '188' (watch for decimal point)\n"
-            "   - Negative values: include '-' sign\n"
-            "6. NO markdown, NO units\n"
-            "\n" + NUMBER_VALIDATION_RULES + "\n" + NOISE_FILTER_RULES
+            "1. Output ONLY the number you see\n"
+            "2. Maximum 3 decimal places (e.g., 5.726 not 5.7261234)\n"
+            "3. ONLY ONE decimal point allowed\n"
+            "4. If blank → Output: 0\n"
+            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown\n"
+            "\n" + NOISE_FILTER_RULES
         ),
         'correction': (
-            "Task: Extract the digital number from the image.\n"
-            "CONTEXT: Similar sensors usually read around {median_context}. "
-            "Use this context ONLY to fix obvious formatting errors (e.g. '188' -> '1.88'). "
-            "However, if the image clearly shows '0' or is blank, IGNORE context and output '0'.\n"
-            "STRICT RULES:\n"
-            "1. Output ONLY the number.\n"
-            "2. FORMATTING: If the number is large (e.g. 188) but context is small (e.g. 1.88), add the decimal.\n"
-            "3. DEFECTS: If the value is '0', '0.0', or blank, output '0'.\n"
-            "4. TRUNCATE: Max 3 decimal places (e.g. '9.18181' -> '9.181').\n"
-            "5. NO HTML, NO MARKDOWN."
+            "Task: Extract the DECIMAL NUMBER from the image.\n"
+            "CONTEXT: Similar sensors usually read around {median_context}.\n"
+            "⚠️ CRITICAL FORMAT RULES:\n"
+            "1. Output ONLY ONE number with ONLY ONE decimal point.\n"
+            "2. MAXIMUM 3 digits after decimal (e.g., 9.128 not 9.12845).\n"
+            "3. If you see duplicate pattern like '9.1289.128' → output '9.128'.\n"
+            "4. If you see multiple decimals like '1.7.7988' → output '1.798'.\n"
+            "5. If blank, output '0'.\n"
+            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown\n"
+            "Output format: X.XXX (e.g., 1.823, 9.128, 0.001)"
         )
     },
     'TIME': {
@@ -260,66 +266,58 @@ PROMPTS = {
             "Rules:\n"
             "1. Output ONLY in format HH:MM:SS\n"
             "2. Use 24-hour format\n"
-            "3. Include leading zeros (e.g., 09:05:03)\n"
-            "4. Remove any trailing text or dates\n"
-            "5. NO markdown"
+            "3. If blank → Output: NA\n"
+            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         ),
         'correction': (
-            "Task: Read Timestamp (HH:MM:SS). Remove trailing text. NO HTML."
+            "Task: Read Timestamp (HH:MM:SS).\n"
+            "Output ONLY the timestamp you see.\n"
+            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         ),
         'mismatch': (
-            "Task: Resolve timestamp dispute with HIGH precision.\n"
-            "Conflict situation:\n"
-            "  - Previous scan read: '{compared_value}'\n"
-            "  - Current scan read: '{current_value}'\n"
-            "  - These should be identical (redundant data)\n"
-            "\n"
-            "Your mission:\n"
-            "1. Look at this image VERY carefully\n"
-            "2. Read the timestamp exactly as shown\n"
-            "3. Format: HH:MM:SS (24-hour format)\n"
-            "4. If display is blank/dark → Output: NA\n"
-            "5. Trust what you SEE, not the OCR history\n"
-            "\n"
-            "Output ONLY the timestamp. NO explanations."
+            "Task: Read the timestamp from this image.\n"
+            "Context: Previous was '{compared_value}', OCR read '{current_value}'.\n"
+            "Output ONLY the timestamp (HH:MM:SS). If blank → NA.\n"
+            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         )
     }
 }
 
-# Mismatch Correction Prompts (from Mismatchcorrection.py - exactly same)
+# Mismatch Correction Prompts (7B Verification)
 MISMATCH_PROMPTS = {
     'STATUS': (
         "Task: Read the text in this image strictly.\n"
         "Options: Usually 'OK' or 'NG'.\n"
         "Context: The previous row was '{compared_value}', but OCR read '{current_value}'.\n"
-        "Command: Output ONLY the text visible in the image. No markdown."
+        "Output ONLY the text visible in the image.\n"
+        "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <>, HTML, markdown"
     ),
     'INTEGER': (
-        "Task: Extract the number from this image with high precision.\n"
-        "Context: There is a dispute. Previous row was '{compared_value}'. Current OCR says '{current_value}'.\n"
-        "Instructions:\n"
-        "1. Look closely for decimal points (e.g., 1.88 vs 188).\n"
-        "2. Look closely for negative signs.\n"
-        "3. Output ONLY the number found in the image.\n"
-        "4. If empty or black, output '0'."
+        "Task: Extract the INTEGER from this image.\n"
+        "Context: Previous was '{compared_value}'. Current OCR says '{current_value}'.\n"
+        "STRICT RULES:\n"
+        "1. Output ONLY the integer number (no decimal point).\n"
+        "2. If empty or black, output '0'.\n"
+        "3. NO special tokens, NO HTML, NO <|...|> tags.\n"
+        "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <>, HTML, markdown"
     ),
     'FLOAT': (
-        "Task: Extract the number from this image with high precision.\n"
-        "Context: There is a dispute. Previous row was '{compared_value}'. Current OCR says '{current_value}'.\n"
-        "Instructions:\n"
-        "1. Look closely for decimal points (e.g., 1.88 vs 188).\n"
-        "2. Look closely for negative signs.\n"
-        "3. Output ONLY the number found in the image.\n"
-        "4. If empty or black, output '0'."
+        "Task: Extract the DECIMAL NUMBER from this image.\n"
+        "Context: Previous was '{compared_value}'. Current OCR says '{current_value}'.\n"
+        "⚠️ CRITICAL FORMAT RULES:\n"
+        "1. Output ONLY ONE number with ONLY ONE decimal point.\n"
+        "2. MAXIMUM 3 digits after decimal (e.g., 9.128 not 9.12845).\n"
+        "3. If you see '9.1289.128' → output '9.128' (remove duplicate).\n"
+        "4. If you see '1.7.7988' → output '1.798' (fix multiple decimals).\n"
+        "5. If empty or black, output '0'.\n"
+        "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <>, HTML, markdown\n"
+        "Output format: X.XXX (e.g., 1.823, 9.128, 0.001)"
     ),
     'TIME': (
-        "Task: Extract the number from this image with high precision.\n"
-        "Context: There is a dispute. Previous row was '{compared_value}'. Current OCR says '{current_value}'.\n"
-        "Instructions:\n"
-        "1. Look closely for decimal points (e.g., 1.88 vs 188).\n"
-        "2. Look closely for negative signs.\n"
-        "3. Output ONLY the number found in the image.\n"
-        "4. If empty or black, output '0'."
+        "Task: Read the timestamp from this image.\n"
+        "Context: Previous was '{compared_value}'. Current OCR says '{current_value}'.\n"
+        "Output ONLY the timestamp (HH:MM:SS).\n"
+        "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <>, HTML, markdown"
     )
 }
 

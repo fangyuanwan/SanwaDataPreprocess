@@ -337,33 +337,57 @@ class Stage5_7BVerification:
             curr_filename=curr_filename
         )
     
-    def run_7b_inference_dual(self, image_path_prev, image_path_curr, prompt):
+    def clean_model_output(self, text, roi_type='FLOAT'):
+        """
+        保留模型原始输出，只移除模型内部控制tokens
+        """
+        if not text:
+            return "ERROR"
+        
+        # 移除模型内部控制tokens（这些是模型格式标记，不是数据）
+        import re
+        special_tokens = [
+            r'<\|im_start\|>',
+            r'<\|im_end\|>',
+            r'<\|endoftext\|>',
+            r'<\|pad\|>',
+            r'<\|assistant\|>',
+            r'<\|user\|>',
+            r'<\|system\|>',
+        ]
+        for token in special_tokens:
+            text = re.sub(token, '', text)
+        
+        # 只取第一行第一个词（不修改数值内容）
+        text = text.strip()
+        text = text.split('\n')[0].strip()
+        text = text.split()[0] if text.split() else text
+        
+        return text if text else "ERROR"
+    
+    def run_7b_inference_dual(self, image_path_prev, image_path_curr, prompt, roi_type='FLOAT'):
         """
         使用7B模型推理（双图像输入）
         """
         try:
-            # 准备双图像消息
             response = ollama.chat(
                 model=OLLAMA_MODEL_7B,
                 messages=[{
                     'role': 'user',
                     'content': prompt,
-                    'images': [str(image_path_prev), str(image_path_curr)]  # 发送两张图像
+                    'images': [str(image_path_prev), str(image_path_curr)]
                 }],
                 options={'temperature': 0.1, 'num_predict': 30}
             )
             
             text = response['message']['content']
-            text = re.sub(r'<[^>]+>', '', text).replace('```', '').replace('`', '').strip()
-            text = text.split('\n')[0].strip()
-            
-            return text if text else "ERROR"
+            return self.clean_model_output(text, roi_type)
             
         except Exception as e:
             print(f"  [7B Dual Error] {e}")
             return "ERROR"
     
-    def run_7b_inference(self, image_path, prompt):
+    def run_7b_inference(self, image_path, prompt, roi_type='FLOAT'):
         """使用7B模型推理"""
         try:
             response = ollama.chat(
@@ -377,10 +401,7 @@ class Stage5_7BVerification:
             )
             
             text = response['message']['content']
-            text = re.sub(r'<[^>]+>', '', text).replace('```', '').replace('`', '').strip()
-            text = text.split('\n')[0].strip()
-            
-            return text if text else "ERROR"
+            return self.clean_model_output(text, roi_type)
             
         except Exception as e:
             print(f"  [7B Error] {e}")
@@ -468,7 +489,7 @@ class Stage5_7BVerification:
                 )
                 
                 # 7B双图像推理
-                ai_result = self.run_7b_inference_dual(img_path_prev, img_path_curr, prompt)
+                ai_result = self.run_7b_inference_dual(img_path_prev, img_path_curr, prompt, roi_type)
                 df.at[idx, 'Comparison_Mode'] = "Dual Image"
             else:
                 # STATUS和TIME只用单图像（current）
@@ -477,7 +498,7 @@ class Stage5_7BVerification:
                     prev_filename=compared_filename,
                     curr_filename=current_filename
                 )
-                ai_result = self.run_7b_inference(img_path_curr, prompt)
+                ai_result = self.run_7b_inference(img_path_curr, prompt, roi_type)
                 df.at[idx, 'Comparison_Mode'] = "Single Image"
             
             # 显示详细信息
@@ -563,6 +584,140 @@ class Stage6_FinalConsolidation:
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
     
+    def detect_format_issues(self, value, roi_type='FLOAT', median_val=None):
+        """检测值是否有格式问题"""
+        if pd.isna(value):
+            return None
+        val_str = str(value).strip()
+        
+        # 检测模型控制tokens（所有类型都检测）
+        if '<|' in val_str or '|>' in val_str:
+            return "special_token"
+        
+        # 对于INTEGER：只有当值超过中位数3倍且位数更多时才检测
+        if roi_type == 'INTEGER':
+            if median_val is not None and median_val > 0:
+                try:
+                    # 尝试解析值（可能包含重复模式如 "123123"）
+                    val = abs(float(val_str.replace('.', '')[:10]))  # 取前10位避免溢出
+                    median_digits = len(str(int(abs(median_val))))
+                    val_digits = len(str(int(val))) if val > 0 else 1
+                    
+                    is_3x_more = val > abs(median_val) * 3
+                    has_more_digits = val_digits > median_digits
+                    
+                    # 只有满足两个条件才继续检测
+                    if not (is_3x_more and has_more_digits):
+                        return None
+                except:
+                    return None
+            else:
+                return None  # 没有中位数时不检测INTEGER
+        
+        # 检测多个小数点
+        if val_str.count('.') > 1:
+            return "multiple_decimals"
+        
+        # 检测超过3位小数（仅FLOAT）
+        if roi_type == 'FLOAT' and '.' in val_str:
+            try:
+                decimal_part = val_str.split('.')[-1]
+                if len(decimal_part) > 3 and decimal_part.isdigit():
+                    return "excess_decimals"
+            except:
+                pass
+        
+        return None
+    
+    def fix_format_issues_with_7b(self, df, csv_base):
+        """使用7B模型修复格式问题"""
+        print(f"  🔍 Checking for format issues...")
+        
+        roi_cols = [c for c in df.columns if c.startswith('ROI_')]
+        issues_found = []
+        
+        # 计算每个ROI的中位数
+        roi_medians = {}
+        for col in roi_cols:
+            roi_type = get_roi_type(col)
+            if roi_type in ['INTEGER', 'FLOAT']:
+                try:
+                    numeric_vals = pd.to_numeric(df[col], errors='coerce')
+                    valid_vals = numeric_vals[(numeric_vals != 0) & (numeric_vals.notna())]
+                    if len(valid_vals) >= 5:
+                        roi_medians[col] = valid_vals.median()
+                except:
+                    pass
+        
+        for col in roi_cols:
+            roi_type = get_roi_type(col)
+            median_val = roi_medians.get(col)
+            for idx, value in df[col].items():
+                issue = self.detect_format_issues(value, roi_type, median_val)
+                if issue:
+                    filename = df.at[idx, 'Filename'] if 'Filename' in df.columns else f"Row_{idx}"
+                    issues_found.append({
+                        'idx': idx,
+                        'roi': col,
+                        'value': value,
+                        'issue': issue,
+                        'filename': filename,
+                        'roi_type': roi_type
+                    })
+        
+        if not issues_found:
+            print(f"  ✅ No format issues detected")
+            return df
+        
+        print(f"  ⚠️  Found {len(issues_found)} format issues, re-verifying with 7B...")
+        
+        # 使用7B重新验证有问题的值
+        fixed_count = 0
+        for item in issues_found:
+            idx = item['idx']
+            roi = item['roi']
+            filename = item['filename']
+            roi_type = item['roi_type']
+            median_val = roi_medians.get(roi)
+            
+            # 查找图片
+            folder_name = Path(filename).stem
+            
+            image_path = None
+            for ext in ['jpg', 'png']:
+                test_path = DEBUG_CROPS_BASE / folder_name / f"{roi}.{ext}"
+                if test_path.exists():
+                    image_path = test_path
+                    break
+            
+            if not image_path:
+                continue
+            
+            # 生成prompt
+            prompt = (
+                f"Task: Extract the {'number' if roi_type in ['FLOAT', 'INTEGER'] else 'value'} from this image.\n"
+                f"⚠️ The previous OCR result '{item['value']}' has formatting errors.\n"
+                f"STRICT RULES:\n"
+                f"1. Output ONLY the clean value you see.\n"
+                f"2. For decimals: ONLY ONE decimal point, MAXIMUM 3 digits after.\n"
+                f"3. NO special tokens like <|im_start|>, NO HTML.\n"
+                f"Output format: Just the number (e.g., 9.128, 1.823, 0)"
+            )
+            
+            try:
+                new_value = self.run_7b_inference(image_path, prompt, roi_type)
+                if new_value and new_value not in ["ERROR", "Image Not Found"]:
+                    # 验证新值是否有效（传入中位数用于INTEGER检测）
+                    if not self.detect_format_issues(new_value, roi_type, median_val):
+                        df.at[idx, roi] = new_value
+                        fixed_count += 1
+                        print(f"    ✓ Fixed {roi} in {filename}: '{item['value']}' → '{new_value}'")
+            except Exception as e:
+                pass
+        
+        print(f"  ✅ Fixed {fixed_count}/{len(issues_found)} format issues")
+        return df
+    
     def apply_7b_corrections(self, labeled_csv_path, verified_log_path):
         """应用7B修正"""
         print(f"\n🔧 Applying 7B corrections: {labeled_csv_path.name}")
@@ -636,36 +791,125 @@ class Stage6_FinalConsolidation:
             return None
         return None
     
+    def get_data_columns(self, row, all_columns):
+        """获取第6列之后的数据列值（用于比较）"""
+        # 跳过前6列：Filename, File_UTC, Machine_Text, Machine_UTC, + 2 more
+        data_cols = all_columns[6:] if len(all_columns) > 6 else all_columns
+        # 排除标记列
+        exclude = ['Time_Status', 'Data_Redundancy', 'Matched_File', 'Duration_Since_Change', 'Real_Freeze_Duration_Sec']
+        data_cols = [c for c in data_cols if c not in exclude and not c.startswith('ROI_5')]
+        return [str(row.get(c, '')).strip() for c in data_cols]
+    
+    def values_are_same(self, vals1, vals2):
+        """检查两行数据值是否相同"""
+        if len(vals1) != len(vals2):
+            return False
+        return vals1 == vals2
+    
     def consolidate_redundancy(self, df):
-        """消除冗余行"""
-        print(f"  🗜️  Consolidating redundancy...")
+        """
+        消除冗余行 - 增强版
+        规则：
+        1. Time Frozen (>10s) + 相同机器时间(ROI_52) + 相同值 → 合并
+        2. 两个冗余行间隔 < 9秒 → 有效冗余，可以合并
+        3. 两个冗余行间隔 >= 9秒 → 即使值相同也保留（可能是两个独立记录）
+        4. 只检查第6列之后的数据列
+        """
+        print(f"  🗜️  Consolidating redundancy (enhanced)...")
         
         df.sort_values(by='Filename', inplace=True)
+        df.reset_index(drop=True, inplace=True)
         rows = df.to_dict('records')
+        all_columns = df.columns.tolist()
         total_rows = len(rows)
         
-        kept_rows = []
+        # 预计算所有时间和数据值
+        row_times = []
+        row_data_vals = []
+        for row in rows:
+            row_times.append(self.parse_pc_filename_time(row.get('Filename', '')))
+            row_data_vals.append(self.get_data_columns(row, all_columns))
+        
+        kept_indices = []
         deletion_log = []
         
         i = 0
         while i < total_rows:
             curr_row = rows[i]
+            curr_time = row_times[i]
+            curr_vals = row_data_vals[i]
+            curr_time_status = str(curr_row.get('Time_Status', ''))
+            curr_redundancy = str(curr_row.get('Data_Redundancy', ''))
+            curr_roi52 = str(curr_row.get('ROI_52', '')).strip()
             
-            if i < total_rows - 1:
-                next_row = rows[i+1]
+            # 总是保留当前行（暂时）
+            kept_indices.append(i)
+            
+            # 查找连续的冗余/冻结行
+            j = i + 1
+            redundant_group = [i]  # 包含当前行
+            
+            while j < total_rows:
+                next_row = rows[j]
+                next_time = row_times[j]
+                next_vals = row_data_vals[j]
+                next_time_status = str(next_row.get('Time_Status', ''))
+                next_redundancy = str(next_row.get('Data_Redundancy', ''))
+                next_roi52 = str(next_row.get('ROI_52', '')).strip()
                 
-                if self.check_redundancy_pair(curr_row, next_row):
-                    kept_rows.append(curr_row)
+                # 计算时间间隔
+                time_gap = 0
+                if curr_time and next_time:
+                    time_gap = (next_time - curr_time).total_seconds()
+                
+                # 检查是否为冗余/冻结行
+                is_frozen = 'Time Frozen' in next_time_status or 'Time Static' in next_time_status
+                is_redundant = 'Redundant' in next_redundancy
+                same_machine_time = (curr_roi52 == next_roi52) and curr_roi52 != ''
+                same_values = self.values_are_same(curr_vals, next_vals)
+                
+                # 规则：间隔 >= 9秒 → 即使值相同也保留（可能是两个独立记录）
+                if time_gap >= 9:
+                    break  # 停止合并，这可能是两个独立的记录
+                
+                # 检查是否应该合并
+                should_merge = False
+                
+                # 条件1: Time Frozen + 相同机器时间 + 相同值
+                if is_frozen and same_machine_time and same_values:
+                    should_merge = True
+                
+                # 条件2: 标记为冗余 + 相同值 + 间隔 < 9秒
+                if is_redundant and same_values and time_gap < 9:
+                    should_merge = True
+                
+                # 条件3: 相同机器时间 + 相同值 + 间隔 < 9秒
+                if same_machine_time and same_values and time_gap < 9:
+                    should_merge = True
+                
+                if should_merge:
+                    redundant_group.append(j)
+                    # 记录删除
                     deletion_log.append({
                         'Deleted_Filename': next_row['Filename'],
-                        'Reason': "Pairwise Compression (Matches Previous)",
-                        'Original_Status': next_row.get('Data_Redundancy')
+                        'Reason': f"Redundancy Merge (Gap: {time_gap:.1f}s, Same ROI_52: {same_machine_time}, Same Values: {same_values})",
+                        'Time_Status': next_time_status,
+                        'Data_Redundancy': next_redundancy,
+                        'Time_Gap_Sec': time_gap
                     })
-                    i += 2
-                    continue
+                    j += 1
+                else:
+                    break
             
-            kept_rows.append(curr_row)
-            i += 1
+            # 只保留组的第一行（已经在kept_indices中）
+            # 跳过已合并的行
+            i = j
+        
+        # 去重kept_indices
+        kept_indices = sorted(set(kept_indices))
+        
+        # 提取保留的行
+        kept_rows = [rows[idx] for idx in kept_indices]
         
         # 计算真实时间间隔
         for k in range(len(kept_rows)):
@@ -682,13 +926,11 @@ class Stage6_FinalConsolidation:
                     step_duration = (curr_time - prev_time).total_seconds()
             
             curr_item['Real_Freeze_Duration_Sec'] = round(step_duration, 2)
-            
-            if "Redundant" in str(curr_item.get('Data_Redundancy', '')):
-                curr_item['Data_Redundancy'] = f"Redundant Pair (Kept 1st) | Gap: {step_duration}s"
         
         df_final = pd.DataFrame(kept_rows)
         
-        print(f"  ✅ Compression: {total_rows} → {len(df_final)} rows (Removed {len(deletion_log)})")
+        removed_count = total_rows - len(df_final)
+        print(f"  ✅ Compression: {total_rows} → {len(df_final)} rows (Removed {removed_count})")
         
         return df_final, deletion_log
     
@@ -710,6 +952,9 @@ class Stage6_FinalConsolidation:
         
         if df_corrected is None:
             return
+        
+        # 格式验证和修复（使用7B重新验证有问题的值）
+        df_corrected = self.fix_format_issues_with_7b(df_corrected, base_name)
         
         # 消除冗余
         df_final, deletion_log = self.consolidate_redundancy(df_corrected)
