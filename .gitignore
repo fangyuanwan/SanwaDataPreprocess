@@ -30,6 +30,14 @@ Input_Images/
 Cleaned_Results_Output/
 Final_AI_Corrected_Logs/
 
+# OCR output directories (Stage 0)
+ocr_output_*/
+debug_crops/
+**/debug_crops/
+
+# Preprocess results
+Preprocess_Result*/
+
 # Large data files
 *.csv
 *.bmp

@@ -1,37 +1,37 @@
 """
-增强版OCR服务器 - 带动态Prompt和实时Median计算
-Enhanced OCR Server with Dynamic Prompts and Real-time Median Calculation
+OCR Server v2 - 简化版OCR服务器
+Simple OCR Server using config_pipeline.py directories
 
-特性 Features:
-1. 根据ROI类型动态生成Prompt
-2. 实时计算并使用Median值作为上下文
-3. 自适应精度控制
-4. 完整的调试输出
+Features:
+1. Uses same directories as ocrserver_enhanced.py
+2. Simple data-type based prompts (no color detection)
+3. Parallel processing with ThreadPoolExecutor
 """
 
 import sys
 import time
 import json
 import csv
+import re
 import cv2
 import ollama
 import os
 import numpy as np
-import pandas as pd
 import concurrent.futures
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from collections import defaultdict
 
-# 导入配置
-from config_pipeline import *
+# 导入配置 - 使用与ocrserver_enhanced.py相同的目录配置
+from config_pipeline import (
+    SOURCE_DIR, STAGE_1_OCR, ROI_JSON, ROI_PAD, UPSCALE, 
+    DARKNESS_THRESHOLD, OLLAMA_MODEL_3B, MAX_WORKERS_3B,
+    CSV_GROUPS, SERVER_ROOT, create_directories, get_roi_type
+)
 
-# ================= Stage 0 专用简单Prompts =================
-# Simple prompts for Stage 0 OCR - based only on data field type
-# These are separate from Stage 1-6 prompts in config_pipeline.py
+# ================= Stage 0 简单Prompts =================
 STAGE0_PROMPTS = {
     'STATUS': "What text do you see in this image? Reply with exactly one word: OK or NG or NA",
     'INTEGER': "What integer number is shown? Reply with only the number, nothing else.",
@@ -40,145 +40,29 @@ STAGE0_PROMPTS = {
     'DATE': "What date/time is shown? Reply with only the text, nothing else.",
 }
 
-# ================= 预计算Median加载器 =================
-class PrecomputedMedianLoader:
-    """
-    从之前处理的 _Final.csv 文件加载预计算的Median值
-    Load pre-computed median values from previously processed _Final.csv files
-    """
-    def __init__(self, final_dataset_dir=None):
-        self.medians = {}  # roi_id -> median_value
-        self.stats = {}    # roi_id -> {median, mean, std, min, max, count}
-        self.lock = threading.Lock()
-        self.loaded = False
-        
-        # 默认路径
-        if final_dataset_dir is None:
-            final_dataset_dir = Path("/home/wanfangyuan/Documents/Sanwa/deploy_version/pipeline_output/stage6_final_dataset")
-        self.final_dataset_dir = Path(final_dataset_dir)
-        
-        # 自动加载
-        self.load_all_medians()
-    
-    def load_all_medians(self):
-        """从所有 _Final.csv 文件加载Median值"""
-        if not self.final_dataset_dir.exists():
-            print(f"⚠️  Final dataset directory not found: {self.final_dataset_dir}")
-            print("   Will use real-time median calculation as fallback.")
-            return
-        
-        print(f"\n📊 Loading pre-computed medians from: {self.final_dataset_dir}")
-        
-        # 查找所有 _Final.csv 文件
-        final_files = list(self.final_dataset_dir.glob("*_Final.csv"))
-        
-        if not final_files:
-            print("⚠️  No _Final.csv files found. Will use real-time calculation.")
-            return
-        
-        for csv_path in final_files:
-            self._load_from_csv(csv_path)
-        
-        self.loaded = True
-        print(f"✅ Loaded medians for {len(self.medians)} ROI fields\n")
-    
-    def _load_from_csv(self, csv_path):
-        """从单个CSV文件加载统计数据"""
-        try:
-            df = pd.read_csv(csv_path)
-            csv_name = csv_path.name
-            print(f"   📄 {csv_name}: {len(df)} rows")
-            
-            # 遍历ROI列
-            for col in df.columns:
-                if not col.startswith('ROI_'):
-                    continue
-                
-                # 获取ROI类型
-                roi_id = col.replace('ROI_', '')
-                roi_type = get_roi_type(roi_id)
-                
-                # 只对数值类型计算median
-                if roi_type not in ['INTEGER', 'FLOAT']:
-                    continue
-                
-                try:
-                    # 转换为数值，忽略错误
-                    vals = pd.to_numeric(df[col], errors='coerce').dropna()
-                    # 过滤掉0值和异常值
-                    vals = vals[(vals > 0) & (vals < vals.quantile(0.99))]
-                    
-                    if len(vals) >= 10:  # 至少10个有效样本
-                        with self.lock:
-                            self.medians[roi_id] = vals.median()
-                            self.stats[roi_id] = {
-                                'median': vals.median(),
-                                'mean': vals.mean(),
-                                'std': vals.std(),
-                                'min': vals.min(),
-                                'max': vals.max(),
-                                'count': len(vals)
-                            }
-                        print(f"      ✓ ROI_{roi_id}: Median={vals.median():.3f}, "
-                              f"Range=[{vals.min():.3f}, {vals.max():.3f}], N={len(vals)}")
-                except Exception as e:
-                    print(f"      ⚠️  ROI_{roi_id}: Error - {e}")
-                    
-        except Exception as e:
-            print(f"   ❌ Error loading {csv_path.name}: {e}")
-    
-    def get_median(self, roi_id):
-        """获取ROI的预计算median值"""
-        with self.lock:
-            return self.medians.get(roi_id, None)
-    
-    def get_stats(self, roi_id):
-        """获取ROI的统计信息"""
-        with self.lock:
-            return self.stats.get(roi_id, None)
-    
-    def add_value(self, roi_id, value, data_type):
-        """兼容旧接口 - 预计算模式下不做任何操作"""
-        pass  # 预计算模式不需要实时更新
-    
-    def print_all_stats(self):
-        """打印所有ROI的统计信息"""
-        print("\n" + "="*60)
-        print("📊 Pre-computed Median Statistics:")
-        print("="*60)
-        with self.lock:
-            for roi_id in sorted(self.stats.keys(), key=lambda x: int(x) if x.isdigit() else 999):
-                stats = self.stats[roi_id]
-                print(f"  ROI_{roi_id}: Median={stats['median']:.3f}, "
-                      f"Mean={stats['mean']:.3f}, Std={stats['std']:.3f}, "
-                      f"Range=[{stats['min']:.3f}, {stats['max']:.3f}], N={stats['count']}")
-        print("="*60 + "\n")
-
-# 全局median加载器（使用预计算值）
-median_tracker = PrecomputedMedianLoader()
 print_lock = threading.Lock()
 
-# ================= 增强的GPU处理器 =================
-class EnhancedGPUHandler(FileSystemEventHandler):
+# ================= OCR处理器 =================
+class OCRHandler(FileSystemEventHandler):
     def __init__(self, rois):
         self.rois = rois
         self.processed_count = 0
-        
+
     def on_created(self, event):
         if not event.is_directory: 
             self.process_new_file(Path(event.src_path))
-    
+
     def on_moved(self, event):
         if not event.is_directory: 
             self.process_new_file(Path(event.dest_path))
-    
+
     def process_new_file(self, file_path: Path):
         """处理新图像文件"""
         if file_path.suffix.lower() not in {'.jpg', '.jpeg', '.png', '.bmp'}: 
             return
         if file_path.name.startswith("."): 
             return
-        
+
         self.processed_count += 1
         print(f"\n⚡ [{self.processed_count}] Processing: {file_path.name}")
         
@@ -186,16 +70,16 @@ class EnhancedGPUHandler(FileSystemEventHandler):
             relative_path = file_path.relative_to(SOURCE_DIR)
         except ValueError:
             relative_path = Path(file_path.name)
-        
+
         relative_parent = relative_path.parent
         
         # 创建调试目录
         image_folder_name = file_path.stem
         target_image_folder = STAGE_1_OCR / "debug_crops" / relative_parent / image_folder_name
         target_image_folder.mkdir(parents=True, exist_ok=True)
-        
+
         self.run_parallel_pipeline(file_path, target_image_folder, relative_parent)
-    
+
     def parse_filename_time(self, filename):
         """从文件名解析时间"""
         try:
@@ -204,7 +88,7 @@ class EnhancedGPUHandler(FileSystemEventHandler):
             return dt.isoformat() + "Z"
         except: 
             return filename
-    
+
     def parse_machine_time(self, text_str):
         """解析机器时间戳"""
         if not text_str or len(text_str) < 5 or "NA" in text_str: 
@@ -216,7 +100,7 @@ class EnhancedGPUHandler(FileSystemEventHandler):
             return dt_utc.isoformat() + "Z"
         except: 
             return text_str
-    
+
     def is_image_too_dark(self, img):
         """简单检查图像是否太暗"""
         if img is None or img.size == 0:
@@ -228,15 +112,10 @@ class EnhancedGPUHandler(FileSystemEventHandler):
             if bright_pixels < (img.size * 0.01):
                 return True
         return False
-    
-    def ask_ollama_simple(self, image_path, roi_id):
-        """
-        Stage 0 专用简单OCR调用 - 仅基于ROI类型
-        Simple OCR for Stage 0 - based only on ROI field type
-        """
+
+    def ask_ollama(self, image_path, roi_id):
+        """OCR调用 - 基于ROI类型使用简单prompt"""
         roi_type = get_roi_type(roi_id)
-        
-        # 使用Stage 0专用简单prompt
         prompt = STAGE0_PROMPTS.get(roi_type, "Read the text. Output only the value.")
         
         try:
@@ -253,8 +132,6 @@ class EnhancedGPUHandler(FileSystemEventHandler):
                 }
             )
             raw = response['message']['content'].strip()
-            
-            # 清理输出
             clean = self.clean_output(raw, roi_type)
             return clean
             
@@ -262,14 +139,9 @@ class EnhancedGPUHandler(FileSystemEventHandler):
             with print_lock:
                 print(f"c", end="", flush=True)
             return "NA"
-    
+
     def clean_output(self, raw_text, roi_type):
-        """
-        清理模型输出 - 仅移除特殊tokens，严格解析
-        Clean model output - remove special tokens, strict parsing
-        """
-        import re
-        
+        """清理模型输出"""
         if not raw_text:
             return "NA"
         
@@ -290,26 +162,23 @@ class EnhancedGPUHandler(FileSystemEventHandler):
         text = text.split('\n')[0].strip()
         text = text.split()[0] if text.split() else text
         
-        # 根据类型处理 - 严格解析
+        # 根据类型处理
         if roi_type == 'STATUS':
             upper = text.upper().strip()
-            # 严格匹配：只有当文本就是OK或NG时才返回
             if upper == 'OK':
                 return 'OK'
             if upper == 'NG':
                 return 'NG'
             if upper == 'NA':
                 return 'NA'
-            # 检查是否是数字（说明这不是STATUS字段的图像）
+            # 检查是否是数字
             if re.match(r'^-?\d+\.?\d*$', text.strip()):
-                return text  # 返回数字本身，不是OK
-            # 如果文本包含NG（严格一点）
+                return text
             if upper.startswith('NG') or upper == 'N':
                 return 'NG'
-            # 如果文本包含OK（严格一点）  
             if upper.startswith('OK') or upper == 'O':
                 return 'OK'
-            return text  # 返回原始文本
+            return text
         
         elif roi_type == 'INTEGER':
             match = re.search(r'-?\d+', text)
@@ -330,9 +199,9 @@ class EnhancedGPUHandler(FileSystemEventHandler):
             return match.group(0) if match else text
         
         return text
-    
+
     def process_single_roi(self, args):
-        """并行处理单个ROI - Stage 0简化版"""
+        """并行处理单个ROI"""
         name, x, y, w, h, img, save_dir = args
         H, W = img.shape[:2]
         
@@ -357,14 +226,14 @@ class EnhancedGPUHandler(FileSystemEventHandler):
         crop_filename = save_dir / f"ROI_{name}.jpg"
         cv2.imwrite(str(crop_filename), crop)
         
-        # 5. 简单亮度检查（无颜色分析）
+        # 5. 亮度检查
         if self.is_image_too_dark(crop):
             with print_lock:
                 print("D", end="", flush=True)
             return name, "NA"
         
-        # 6. OCR识别（简单prompt，无颜色逻辑）
-        text_val = self.ask_ollama_simple(crop_filename, name)
+        # 6. OCR识别
+        text_val = self.ask_ollama(crop_filename, name)
         
         # 7. 保存文本结果
         try:
@@ -375,20 +244,20 @@ class EnhancedGPUHandler(FileSystemEventHandler):
         
         # 8. 输出进度
         with print_lock:
-            if name in ["51", "52"]:  # 时间戳ROI
+            if name in ["51", "52"]:
                 print(f" [{name}: {text_val}] ", end="", flush=True)
             else:
                 print(".", end="", flush=True)
         
         return name, text_val
-    
+
     def run_parallel_pipeline(self, img_path, save_dir, relative_parent):
         """并行处理管道"""
         img = cv2.imread(str(img_path))
         if img is None:
             print(f"  ❌ Cannot read image: {img_path}")
             return
-        
+
         # 绘制调试地图
         try:
             vis_img = img.copy()
@@ -399,7 +268,7 @@ class EnhancedGPUHandler(FileSystemEventHandler):
             cv2.imwrite(str(save_dir / "_DEBUG_MAP.jpg"), vis_img)
         except: 
             pass
-        
+
         print(f"  --> Processing {len(self.rois)} ROIs with {MAX_WORKERS_3B} workers...")
         start_t = time.time()
         
@@ -413,24 +282,24 @@ class EnhancedGPUHandler(FileSystemEventHandler):
             results = executor.map(self.process_single_roi, tasks)
             for name, text_val in results:
                 collected_results[name] = text_val
-        
+
         duration = time.time() - start_t
         print(f"\n  --> Finished in {duration:.1f}s")
-        
+
         # 保存JSON结果
         try:
             with open(save_dir / "results.json", "w", encoding="utf-8") as f:
                 json.dump(collected_results, f, indent=2, ensure_ascii=False)
         except: 
             pass
-        
+
         # 解析元数据
         filename_utc = self.parse_filename_time(img_path.name)
         raw_machine_time = collected_results.get("51", "")
         if not raw_machine_time or raw_machine_time == "NA":
             raw_machine_time = collected_results.get("52", "")
         calc_machine_utc = self.parse_machine_time(raw_machine_time)
-        
+
         # 写入CSV
         for csv_name, id_range in CSV_GROUPS.items():
             self.append_to_summary_csv(
@@ -438,15 +307,7 @@ class EnhancedGPUHandler(FileSystemEventHandler):
                 img_path.name, filename_utc, raw_machine_time,
                 calc_machine_utc, relative_parent
             )
-        
-        # 打印median统计（每10个图像）
-        if self.processed_count % 10 == 0:
-            self.print_median_stats()
-    
-    def print_median_stats(self):
-        """打印median统计信息"""
-        median_tracker.print_all_stats()
-    
+
     def append_to_summary_csv(self, csv_name, id_list, results_dict, 
                              filename, file_utc, raw_mach, calc_mach, 
                              relative_parent):
@@ -512,7 +373,7 @@ def main():
     # 检查服务器根目录
     if not SERVER_ROOT.exists():
         print(f"❌ Error: SERVER_ROOT does not exist: {SERVER_ROOT}")
-        print("   Please create it or update config_pipeline.py")
+        print("   Please update config_pipeline.py")
         return
     
     # 创建必要目录
@@ -525,7 +386,7 @@ def main():
         return
     
     print("="*60)
-    print("🚀 Enhanced OCR Server Started (3B Model)")
+    print("🚀 OCR Server v2 Started")
     print(f"   Model: {OLLAMA_MODEL_3B}")
     print(f"   Workers: {MAX_WORKERS_3B} (Parallel)")
     print(f"   ROIs: {len(rois)} configured")
@@ -533,7 +394,7 @@ def main():
     print(f"   Output: {STAGE_1_OCR}")
     print("="*60)
     
-    handler = EnhancedGPUHandler(rois)
+    handler = OCRHandler(rois)
     
     # 1. 扫描现有文件
     print("\n📁 Scanning directory tree...")
@@ -555,13 +416,11 @@ def main():
             handler.process_new_file(img_path)
         except KeyboardInterrupt:
             print("\n🛑 Stopped by user.")
-            handler.print_median_stats()
             return
         except Exception as e:
             print(f"\n❌ Error processing {img_path.name}: {e}")
     
     print("\n✅ Batch done. Monitoring for NEW files...")
-    handler.print_median_stats()
     
     # 2. 监控新文件
     observer = Observer()
@@ -574,9 +433,7 @@ def main():
     except KeyboardInterrupt:
         observer.stop()
         print("\n🛑 Server stopped.")
-        handler.print_median_stats()
     observer.join()
 
 if __name__ == "__main__":
     main()
-

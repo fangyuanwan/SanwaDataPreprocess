@@ -8,16 +8,21 @@ from pathlib import Path
 # 项目根目录 / Project Root Directory
 PROJECT_ROOT = Path("/home/wanfangyuan/Documents/Sanwa/deploy_version")
 
-# 服务器根目录（保留用于未来部署）/ Server Root Directory (for future deployment)
-SERVER_ROOT = Path("/home/ubuntu/sanwa_project")
+# 服务器根目录 / Server Root Directory
+# 使用项目根目录作为服务器根目录
+SERVER_ROOT = PROJECT_ROOT
 
 # 输入数据路径 / Input Data Paths
 CSV_INPUT_DIR = PROJECT_ROOT / "Archive" / "Archive" / "Cut_preprocesseddata"
-DEBUG_CROPS_INPUT = Path("/home/wanfangyuan/Desktop/Wan_Fangyuan/Sanwa/Sanwa Data2/ASTAR/Sanwadata/sanwa_ocr_debug/Sanwadata/12_16_cslot/2025-12-16/debug_crops")
+DEBUG_CROPS_INPUT = Path("/home/wanfangyuan/Desktop/Wan_Fangyuan/Sanwa/Sanwa Data2/ASTAR/Sanwadata/sanwa_ocr_debug/Sanwadata/12_19_cslot/2025-12-19/debug_crops")
 
 # 输入输出目录 / Input/Output Directories
-SOURCE_DIR = PROJECT_ROOT / "input_images"  # 原始图像输入（Stage 0使用）
-OUTPUT_BASE = PROJECT_ROOT / "pipeline_output"
+SOURCE_DIR = Path("/home/wanfangyuan/Desktop/Wan_Fangyuan/Sanwa/Sanwadata27Dec/12-19-2025cslot/2025-12-19")   # 原始图像输入（Stage 0使用）
+
+# ⚠️ 修改此变量可更改所有输出目录的根路径
+# Change this variable to redirect all output to a new folder
+PREPROCESS_ROOT = Path("/home/wanfangyuan/Desktop/Wan_Fangyuan/Sanwa/Preprocess_Result7Jan")
+OUTPUT_BASE = PREPROCESS_ROOT / "ocr_output_12_19_v2"  # OCR输出放在Preprocess_Result7Jan下
 
 # 各阶段输出目录 / Stage Output Directories
 # Stage 1: 模拟的OCR输出结构（使用现有数据）/ Simulated OCR output structure (using existing data)
@@ -29,13 +34,13 @@ STAGE_5_7B_VERIFIED = OUTPUT_BASE / "stage5_7b_verified"
 STAGE_6_FINAL = OUTPUT_BASE / "stage6_final_dataset"
 
 # 调试和检查目录 / Debug and Review Directories
-DEBUG_CROPS_BASE = Path("/home/wanfangyuan/Desktop/Wan_Fangyuan/Sanwa/Sanwa Data2/ASTAR/Sanwadata/sanwa_ocr_debug/Sanwadata/12_16_cslot/2025-12-16/debug_crops")
+DEBUG_CROPS_BASE = PREPROCESS_ROOT / "ocr_output_12_19" / "debug_crops"
 ABNORMAL_CROPS_BASE = OUTPUT_BASE / "abnormal_crops_review"
 REDUNDANCY_CROPS_BASE = OUTPUT_BASE / "redundancy_crops_review"
 
 # 人工检查目录 / Manual Check Directories
-MANUAL_CHECK_BASE_Abnormal = Path("/home/wanfangyuan/Desktop/Wan_Fangyuan/Sanwa/Sanwa Data2/ASTAR/Sanwadata/Cleaned_Results_Output12_16/Abnormal05Jan0945")
-MANUAL_CHECK_BASE_Mismatch = Path("/home/wanfangyuan/Desktop/Wan_Fangyuan/Sanwa/Sanwa Data2/ASTAR/Sanwadata/Cleaned_Results_Output12_16/Mismatch")
+MANUAL_CHECK_BASE_Abnormal = PREPROCESS_ROOT / "ocr_output_12_19" / "Abnormal"
+MANUAL_CHECK_BASE_Mismatch = PREPROCESS_ROOT / "ocr_output_12_19" / "Mismatch"
 
 # ================= 模型配置 / Model Configuration =================
 OLLAMA_MODEL_3B = "qwen2.5vl:3b"
@@ -199,49 +204,69 @@ PROMPTS = {
             "  - RED text/color = 'NG' (fail/bad)\n"
             "  - Trust the COLOR more than the text shape!\n"
             "\n"
-            "📋 CLASSIFICATION RULES (ONLY 2 outputs allowed):\n"
-            "  ✅ Starts with 'O' → Output: OK (includes O, OH, OK, 0)\n"
-            "  ❌ Starts with 'N' → Output: NG (includes N, NG, NH, NO)\n"
+            "📋 OUTPUT FORMAT: Must be exactly 'OK' or 'NG'\n"
             "\n"
             "Rules:\n"
             "1. Output ONLY 'OK' or 'NG' (nothing else, no NA)\n"
-            "2. If text starts with O or looks like O → Output: OK\n"
-            "3. If text starts with N or looks like N → Output: NG\n"
+            "2. GREEN color or starts with O → Output: OK\n"
+            "3. RED color or starts with N → Output: NG\n"
             "4. If image is blank or unreadable → Output: NG (default to fail-safe)\n"
             "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown\n"
             "\n" + NOISE_FILTER_RULES
         ),
         'correction': (
-            "Task: Classify as 'OK' or 'NG'. (0/OK/OH -> OK, N/NG -> NG).\n"
-            "Output ONLY one word.\n"
+            "Task: Classify as 'OK' or 'NG'.\n"
+            "📋 OUTPUT FORMAT: Exactly 'OK' or 'NG' (nothing else)\n"
             "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         )
     },
     'INTEGER': {
         'initial': (
             "Task: Extract the integer number from this digital display.\n"
+            "\n"
+            "📋 OUTPUT FORMAT: Integer only (e.g., 95, 100, -5)\n"
+            "\n"
+            "⚠️ IMPORTANT: Output EXACTLY what you see in the image!\n"
+            "   Reference value ~{median_context} is just a GUIDELINE.\n"
+            "   If the image shows a different number, OUTPUT THAT NUMBER.\n"
+            "\n"
             "Rules:\n"
-            "1. Output ONLY the integer you see\n"
-            "2. If negative, include the '-' sign\n"
-            "3. If blank → Output: 0\n"
+            "1. Output ONLY the integer you actually see\n"
+            "2. NO decimal point allowed for integer fields\n"
+            "3. If negative, include the '-' sign\n"
+            "4. If blank → Output: 0\n"
             "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown\n"
             "\n" + NOISE_FILTER_RULES
         ),
         'correction': (
             "Task: Extract the integer from the image.\n"
-            "CONTEXT: Similar sensors usually read around {median_context}.\n"
-            "STRICT RULES:\n"
-            "1. Output ONLY the integer number (no decimal point).\n"
-            "2. If blank, output '0'.\n"
+            "\n"
+            "📋 OUTPUT FORMAT: Integer only (e.g., 95, 100)\n"
+            "\n"
+            "⚠️ CRITICAL: Output EXACTLY what you SEE, not what you expect!\n"
+            "   Reference ~{median_context} is just a guideline for context.\n"
+            "   Your job is to report the ACTUAL number in the image.\n"
+            "\n"
+            "Rules:\n"
+            "1. Output ONLY the integer number (no decimal point)\n"
+            "2. If blank, output '0'\n"
             "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         )
     },
     'FLOAT': {
         'initial': (
             "Task: Extract the floating-point number from this sensor reading.\n"
+            "\n"
+            "📋 OUTPUT FORMAT: Decimal number with max 3 decimal places\n"
+            "   Examples: 1.188, 16.069, 0.5\n"
+            "\n"
+            "⚠️ IMPORTANT: Output EXACTLY what you see in the image!\n"
+            "   Reference value ~{median_context} is just a GUIDELINE.\n"
+            "   If the image shows a different number, OUTPUT THAT NUMBER.\n"
+            "\n"
             "Rules:\n"
-            "1. Output ONLY the number you see\n"
-            "2. Maximum 3 decimal places (e.g., 5.726 not 5.7261234)\n"
+            "1. Output the ACTUAL number you see\n"
+            "2. Maximum 3 decimal places\n"
             "3. ONLY ONE decimal point allowed\n"
             "4. If blank → Output: 0\n"
             "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown\n"
@@ -249,20 +274,32 @@ PROMPTS = {
         ),
         'correction': (
             "Task: Extract the DECIMAL NUMBER from the image.\n"
-            "CONTEXT: Similar sensors usually read around {median_context}.\n"
-            "⚠️ CRITICAL FORMAT RULES:\n"
-            "1. Output ONLY ONE number with ONLY ONE decimal point.\n"
-            "2. MAXIMUM 3 digits after decimal (e.g., 9.128 not 9.12845).\n"
-            "3. If you see duplicate pattern like '9.1289.128' → output '9.128'.\n"
-            "4. If you see multiple decimals like '1.7.7988' → output '1.798'.\n"
-            "5. If blank, output '0'.\n"
-            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown\n"
-            "Output format: X.XXX (e.g., 1.823, 9.128, 0.001)"
+            "\n"
+            "📋 OUTPUT FORMAT: X.XXX (e.g., 1.823, 16.069, 0.001)\n"
+            "\n"
+            "⚠️ CRITICAL: Output EXACTLY what you SEE, not what you expect!\n"
+            "   Reference ~{median_context} is just a guideline for context.\n"
+            "   Your job is to report the ACTUAL number in the image.\n"
+            "\n"
+            "   If you see 2.03, output 2.03 (even if reference is 1.18)\n"
+            "   If you see 16.5, output 16.5 (even if reference is 16.06)\n"
+            "\n"
+            "Format Rules:\n"
+            "1. ONLY ONE decimal point allowed\n"
+            "2. MAXIMUM 3 digits after decimal\n"
+            "3. If you see '9.1289.128' → fix to '9.128' (remove duplicate)\n"
+            "4. If you see '1.7.798' → fix to '1.798' (fix multiple decimals)\n"
+            "5. If blank, output '0'\n"
+            "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         )
     },
     'TIME': {
         'initial': (
             "Task: Read the timestamp from this display.\n"
+            "\n"
+            "📋 OUTPUT FORMAT: HH:MM:SS (24-hour format)\n"
+            "   Examples: 17:06:42, 09:15:30, 23:59:59\n"
+            "\n"
             "Rules:\n"
             "1. Output ONLY in format HH:MM:SS\n"
             "2. Use 24-hour format\n"
@@ -270,17 +307,60 @@ PROMPTS = {
             "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         ),
         'correction': (
-            "Task: Read Timestamp (HH:MM:SS).\n"
+            "Task: Read Timestamp from the image.\n"
+            "📋 OUTPUT FORMAT: HH:MM:SS (e.g., 17:06:42)\n"
             "Output ONLY the timestamp you see.\n"
             "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         ),
         'mismatch': (
             "Task: Read the timestamp from this image.\n"
             "Context: Previous was '{compared_value}', OCR read '{current_value}'.\n"
+            "📋 OUTPUT FORMAT: HH:MM:SS\n"
             "Output ONLY the timestamp (HH:MM:SS). If blank → NA.\n"
             "🚫 FORBIDDEN: <|im_start|>, <|endoftext|>, <|im_end|>, <>, HTML, markdown"
         )
     }
+}
+
+# ================= 字段特定提示 / Field-Specific Prompts =================
+# 为每个具体ROI字段定义预期范围和格式
+FIELD_SPECIFIC_HINTS = {
+    # CslotCam4result fields
+    '1': {'type': 'STATUS', 'hint': 'C-Slot Status', 'format': 'OK or NG'},
+    '2': {'type': 'INTEGER', 'hint': 'Counter/Count value', 'format': 'Integer (e.g., 95)', 'typical_range': '90-100'},
+    '3': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    '4': {'type': 'FLOAT', 'hint': 'Measurement value', 'format': 'X.XXX (e.g., 1.188)', 'typical_range': '1.1-1.3'},
+    '5': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    '6': {'type': 'FLOAT', 'hint': 'Large measurement', 'format': 'XX.XXX (e.g., 16.069)', 'typical_range': '15.8-16.2'},
+    '7': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    '8': {'type': 'FLOAT', 'hint': 'Measurement value', 'format': 'X.XXX (e.g., 1.165)', 'typical_range': '1.1-1.3'},
+    '9': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    '10': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    '11': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    
+    # cam 6 snap1 Latchresult fields
+    '12': {'type': 'STATUS', 'hint': 'Latch Status', 'format': 'OK or NG'},
+    '13': {'type': 'INTEGER', 'hint': 'Confidence/Count', 'format': 'Integer (e.g., 97)'},
+    '14': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    '15': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    '16': {'type': 'FLOAT', 'hint': 'Measurement', 'format': 'X.XXX', 'typical_range': '1.5-2.5'},
+    '17': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    '18': {'type': 'FLOAT', 'hint': 'Measurement', 'format': 'X.XXX', 'typical_range': '1.5-2.5'},
+    '19': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    
+    # cam 6 snap2 nozzleresult fields
+    '20': {'type': 'STATUS', 'hint': 'Nozzle Status', 'format': 'OK or NG'},
+    '21': {'type': 'INTEGER', 'hint': 'Count value', 'format': 'Integer'},
+    '22': {'type': 'STATUS', 'hint': 'Status indicator', 'format': 'OK or NG'},
+    '23': {'type': 'FLOAT', 'hint': 'Measurement', 'format': 'X.XXX'},
+    
+    # Terminal result fields (31-50)
+    '31': {'type': 'STATUS', 'hint': 'Terminal Status', 'format': 'OK or NG'},
+    '32': {'type': 'INTEGER', 'hint': 'Terminal Count', 'format': 'Integer'},
+    
+    # Timestamp fields
+    '51': {'type': 'DATE', 'hint': 'Date display', 'format': 'MM/DD/YY'},
+    '52': {'type': 'TIME', 'hint': 'Time display', 'format': 'HH:MM:SS'},
 }
 
 # Mismatch Correction Prompts (7B Verification)
@@ -336,6 +416,21 @@ def get_roi_type(roi_id: str) -> str:
     """获取ROI的数据类型"""
     return ROI_TYPE_MAP.get(roi_id, 'STATUS')
 
+def get_field_hint(roi_id: str) -> str:
+    """获取字段特定的提示信息"""
+    # 清理ROI_前缀
+    clean_id = str(roi_id).replace('ROI_', '')
+    
+    if clean_id in FIELD_SPECIFIC_HINTS:
+        hint = FIELD_SPECIFIC_HINTS[clean_id]
+        parts = [f"Field: ROI_{clean_id} ({hint.get('hint', 'Unknown')})"]
+        if 'format' in hint:
+            parts.append(f"Expected Format: {hint['format']}")
+        if 'typical_range' in hint:
+            parts.append(f"Typical Range: {hint['typical_range']} (GUIDELINE ONLY)")
+        return "\n".join(parts)
+    return ""
+
 def get_prompt(roi_id: str, prompt_type: str = 'initial', 
                ocr_value: str = '', median_value: float = None,
                compared_value: str = '', current_value: str = '',
@@ -344,16 +439,18 @@ def get_prompt(roi_id: str, prompt_type: str = 'initial',
     根据ROI类型和上下文生成prompt
     
     Args:
-        roi_id: ROI标识符（如 'ROI_13'）
+        roi_id: ROI标识符（如 'ROI_13' 或 '13'）
         prompt_type: 'initial', 'correction', 或 'mismatch'
         ocr_value: 之前的OCR结果（用于correction）
-        median_value: 该ROI的中位数值（用于上下文提示）
+        median_value: 该ROI的中位数值（仅作为参考，不是目标值）
         compared_value: 比较值（用于mismatch）
         current_value: 当前值（用于mismatch）
         prev_filename: 前一张图像文件名（用于mismatch dual comparison）
         curr_filename: 当前图像文件名（用于mismatch dual comparison）
     """
-    roi_type = get_roi_type(roi_id)
+    # 清理ROI_前缀
+    clean_id = str(roi_id).replace('ROI_', '')
+    roi_type = get_roi_type(clean_id)
     
     # 选择prompt模板
     if prompt_type == 'mismatch':
@@ -361,18 +458,20 @@ def get_prompt(roi_id: str, prompt_type: str = 'initial',
     else:
         template = PROMPTS.get(roi_type, {}).get(prompt_type, PROMPTS['STATUS']['initial'])
     
-    # 格式化median上下文
-    median_context = "No reference available"
+    # 格式化median上下文 - 强调这只是参考值，不是目标值
+    median_context = "N/A"
     if median_value is not None:
         if roi_type == 'STATUS':
-            # 对于STATUS，显示最常见的值
-            median_context = f"Most common: {median_value}"
+            median_context = f"(typically {median_value})"
         elif roi_type == 'INTEGER':
-            median_context = f"{int(median_value)}"
+            median_context = f"{int(median_value)} (reference only - output what you SEE)"
         elif roi_type == 'FLOAT':
-            median_context = f"{median_value:.3f}"
+            median_context = f"{median_value:.3f} (reference only - output what you SEE)"
         elif roi_type == 'TIME':
-            median_context = "Timestamp (varies)"
+            median_context = "(varies)"
+    
+    # 获取字段特定提示
+    field_hint = get_field_hint(roi_id)
     
     # 替换所有占位符
     prompt = template.replace('{ocr_value}', str(ocr_value))
@@ -381,7 +480,11 @@ def get_prompt(roi_id: str, prompt_type: str = 'initial',
     prompt = prompt.replace('{current_value}', str(current_value))
     prompt = prompt.replace('{prev_filename}', str(prev_filename))
     prompt = prompt.replace('{curr_filename}', str(curr_filename))
-    prompt = prompt.replace('{roi_id}', str(roi_id).replace('ROI_', ''))
+    prompt = prompt.replace('{roi_id}', clean_id)
+    
+    # 添加字段特定提示（如果有）
+    if field_hint:
+        prompt = f"📌 {field_hint}\n\n{prompt}"
     
     return prompt
 
